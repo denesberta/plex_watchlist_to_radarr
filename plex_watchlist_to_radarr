@@ -1,0 +1,40 @@
+#!/bin/bash
+# Instructions to get your plex token https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/
+
+plex_metadata_provider="https://metadata.provider.plex.tv/library"
+plex_notification_url="https://notifications.plex.tv/api/v1/notifications"
+plex_token=""
+radarr_apikey=""
+radarr_root_folder="/mnt/drive2/movies"
+radarr_url="127.0.0.1:7878" # xxx.xxx.xxx.xxx.xxx:7878/radarr
+quality_profile="SD-EN-Watchlist" #H as to match what is shown in radarr
+
+quality_profile_id=$(curl -s "http://$radarr_url/api/v3/qualityprofile?&apikey=$radarr_apikey" | awk 'BEGIN{RS=""; FS="'$quality_profile'"}NF>1{print $NF}' | grep -m1 -A4 language | tail -n1 | grep -oP '"id": *\K[^"]*')
+radarr_movies=$(curl -s "http://$radarr_url/api/v3/movie?&apikey=$radarr_apikey")
+watchlistXml=$(curl -f -s  "$plex_metadata_provider/sections/watchlist/all?X-Plex-Token=$plex_token")
+movies=$(echo $watchlistXml | awk 'BEGIN{RS="/>"; FS="<Video "}NF>1{print $NF}')
+while read -r line; do
+  title=$(echo $line | grep -Po '(?<=title=").*?(?=")')
+  guid=$(echo $line | grep -Po '(?<=guid="plex:\/\/movie\/).*?(?=")')
+  tmdb_id=$(curl -s "$plex_metadata_provider/metadata/$guid?X-Plex-Token=$plex_token" | grep -Po '(?<=tmdb:\/\/).*?(?=")')
+  echo $tmdb_id
+
+  radarr_check=$(echo $radarr_movies | jq ".[] | select(.tmdbId == $tmdb_id)")
+  #TODO If removed from plex watchlist but in radarr with the add_from_watchlist tag then remove(add from watchlist tag when added)
+
+  if [ -z "$radarr_check" ]; then
+      echo "Movie Does Not Exist ... Adding"
+      curl -H "Content-Type: application/json" -X POST -d '{"title":"$title", "qualityProfileId":"'$quality_profile_id'", "tmdbid":"'$tmdb_id'", "searchForMovie" : true, "rootFolderPath":"'$radarr_root_folder'", "monitored": true, "addOptions" : {"searchForMovie" : true}, "tags": [1]}' http://"$radarr_url"/api/v3/movie?apikey=$radarr_apikey
+  else
+    if [ "$(echo $radarr_check | jq '.hasFile')" != "true" ] && [ "$(echo $radarr_check | jq '.tags | length')" -eq 0 ]; then
+      #If movie exists but has no file and no tags with the plex_watchlist_tag then remove the movie first and then add again because radarr doesnt have a way to download the movie again when already added
+      echo "Movie Does Exist In Radarr But Doesn't has File ... Removing First"
+      curl -H "Content-Type: application/json" -X DELETE http://"$radarr_url"/api/v3/movie/$(echo $radarr_check | jq '.id')?apikey=$radarr_apikey
+
+      #Adding movie with tag
+      echo "Adding Movie"
+      curl -H "Content-Type: application/json" -X POST -d '{"title":"$title", "qualityProfileId":"'$quality_profile_id'", "tmdbid":"'$tmdb_id'", "searchForMovie" : true, "rootFolderPath":"'$radarr_root_folder'", "monitored": true, "addOptions" : {"searchForMovie" : true}, "tags": [1]}' http://"$radarr_url"/api/v3/movie?apikey=$radarr_apikey
+    fi
+    echo "Movie Already Exists ... Skipping"
+  fi
+done <<< "$movies"
